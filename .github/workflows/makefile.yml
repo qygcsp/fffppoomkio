@@ -12,7 +12,7 @@ jobs:
     env:
       ARCH: arm64
       NDK_VERSION: r20b
-      KCFLAGS: "-Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=implicit-int"
+      KCFLAGS: "-Wno-error=array-bounds -Wno-error=stringop-overflow"
 
     steps:
     - name: Checkout source
@@ -20,12 +20,10 @@ jobs:
       with:
         repository: qgzslm/ppoomkio
         fetch-depth: 0
-        # 确保检出所有子模块
-        submodules: recursive
+        submodules: recursive  # 确保检出所有子模块
 
     - name: Setup environment
       run: |
-        # 安装基础工具链
         sudo apt-get update
         sudo apt-get install -y \
             bc \
@@ -56,30 +54,21 @@ jobs:
         echo "GCC_PATH=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
         echo "$CLANG_PATH:$GCC_PATH" >> $GITHUB_PATH
 
-    - name: Clean parser cache
+    - name: Apply signal.h patch
       run: |
-        # 修复yylloc重复定义
-        if [ -f scripts/kconfig/zconf.tab.c ]; then
-          rm -f scripts/kconfig/zconf.tab.c 
-        fi
-        if [ -f scripts/kconfig/zconf.lex.c ]; then
-          rm -f scripts/kconfig/zconf.lex.c
-        fi
-        make O=out scripts/kconfig/zconf.tab.c
-
-    - name: Apply hotfixes
-      run: |
-        # 修复字符串拼接类型警告（使用更安全的路径查找）
-        find drivers/ -type f -name "*.c" -exec sed -i 's/(unsigned long)arg + str/(const char *)(uintptr_t)arg + str/g' {} + || true
+        # 修复数组越界核心问题
+        sed -i 's/unsigned long sig\[_NSIG_WORDS\]/unsigned long sig[2]/g' \
+            include/uapi/asm-generic/signal.h \
+            include/linux/signal.h
         
-        # 修复数组索引警告（增加文件存在性检查）
-        if [ -f drivers/android/ion/ion_buffer.c ]; then
-          sed -i 's/array\[index\++]/array[(int)index\++]/g' drivers/android/ion/ion_buffer.c
-        elif [ -f drivers/staging/android/ion/ion_buffer.c ]; then
-          sed -i 's/array\[index\++]/array[(int)index\++]/g' drivers/staging/android/ion/ion_buffer.c
-        else
-          echo "WARNING: ion_buffer.c not found in expected locations"
-        fi
+        # 修改信号集操作宏
+        sed -i 's/#define _NSIG_WORDS\s\+.*/#define _NSIG_WORDS 2/' \
+            include/linux/signal.h
+        
+        # 修复case语句中的数组访问
+        find . -name "signal.h" -exec sed -i \
+            -e 's/case 2: set->sig\[1\]/case 2: if (_NSIG_WORDS > 1) set->sig[1]/g' \
+            -e 's/\(sig\[0\] =\)/\1/g' {} +
 
     - name: Build kernel
       run: |
@@ -99,7 +88,7 @@ jobs:
             NM="$CLANG_PATH/llvm-nm" \
             STRIP="$CLANG_PATH/llvm-strip" \
             KCFLAGS="$KCFLAGS" \
-            CFLAGS_MODULE="-Wno-error"
+            CFLAGS_MODULE="-Wno-implicit-function-declaration"
 
     - name: Upload image
       if: success()
