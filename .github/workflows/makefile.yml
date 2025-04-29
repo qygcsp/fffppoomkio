@@ -1,3 +1,4 @@
+# .github/workflows/android-kernel-ci.yml
 name: Android Kernel CI
 
 on:
@@ -10,8 +11,9 @@ jobs:
     env:
       ARCH: arm64
       SUBARCH: arm64
-      CROSS_COMPILE: aarch64-linux-android-
-      CLANG_TRIPLE: aarch64-linux-gnu-
+      CLANG_TRIPLE: aarch64-linux-android-
+      LINUX_GCC_CROSS_COMPILE_PREFIX: aarch64-linux-android-
+      LINUX_GCC_CROSS_COMPILE_ARM32_PREFIX: arm-linux-androideabi-
 
     steps:
       - name: Checkout kernel source
@@ -23,31 +25,48 @@ jobs:
       - name: Setup build environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y flex bison build-essential libncurses-dev
+          sudo apt-get install -y \
+              flex \
+              bison \
+              build-essential \
+              libncurses-dev \
+              clang \
+              lld \
+              llvm \
+              unzip
 
       - name: Setup AOSP toolchain
         run: |
           mkdir -p aosp-tools
-          # 使用Android 9对应的工具链版本
+          cd aosp-tools
           wget https://dl.google.com/android/repository/android-ndk-r20b-linux-x86_64.zip
-          unzip android-ndk-r20b-linux-x86_64.zip
-          export ANDROID_TOOLCHAIN=$(pwd)/android-ndk-r20b/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin
+          unzip -q android-ndk-r20b-linux-x86_64.zip
+          echo "ANDROID_TOOLCHAIN=$(pwd)/android-ndk-r20b/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
           echo "$ANDROID_TOOLCHAIN" >> $GITHUB_PATH
+          echo "CLANG_BIN=$ANDROID_TOOLCHAIN/clang" >> $GITHUB_ENV
 
       - name: Build kernel
         run: |
-          make O=out msmcortex-NX563J-perf_defconfig
-          make -j$(nproc --all) O=out \
-              CC=clang \
-              CLANG_TRIPLE=aarch64-linux-gnu- \
-              CROSS_COMPILE=aarch64-linux-android- \
-              CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+          # 生成配置文件
+          make O=out ARCH=${{ env.ARCH }} \
+              CC="${{ env.CLANG_BIN }}" \
+              CLANG_TRIPLE=${{ env.CLANG_TRIPLE }} \
+              CROSS_COMPILE="${{ env.LINUX_GCC_CROSS_COMPILE_PREFIX }}" \
+              msmcortex-NX563J-perf_defconfig
+
+          # 完整编译
+          make -j$(nproc --all) O=out ARCH=${{ env.ARCH }} \
+              CC="${{ env.CLANG_BIN }}" \
+              CLANG_TRIPLE=${{ env.CLANG_TRIPLE }} \
+              CROSS_COMPILE="${{ env.LINUX_GCC_CROSS_COMPILE_PREFIX }}" \
+              CROSS_COMPILE_ARM32="${{ env.LINUX_GCC_CROSS_COMPILE_ARM32_PREFIX }}" \
               LD=ld.lld \
               AR=llvm-ar \
               NM=llvm-nm \
               OBJCOPY=llvm-objcopy \
               OBJDUMP=llvm-objdump \
-              STRIP=llvm-strip
+              STRIP=llvm-strip \
+              KCFLAGS="-Wno-error=unused-function -Wno-error=unused-variable"
 
       - name: Archive artifacts
         uses: actions/upload-artifact@v4
