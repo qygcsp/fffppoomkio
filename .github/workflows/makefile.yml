@@ -1,20 +1,18 @@
-# .github/workflows/android_kernel_build.yml
-name: Android Kernel Builder
+# .github/workflows/android_kernel_ci.yml
+name: Android 9 Kernel Builder
 
 on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Kernel Build
+  build-kernel:
+    name: Build Kernel
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
-    
+    timeout-minutes: 60
     env:
       ARCH: arm64
-      KERNEL_DIR: ${{ github.workspace }}
-      CLANG_VERSION: 12
       NDK_VERSION: r20b
+      KCFLAGS: "-Wno-error=stringop-overflow -Wno-error=array-bounds -Wno-error=implicit-int"
 
     steps:
     - name: Checkout source
@@ -25,88 +23,76 @@ jobs:
 
     - name: Setup environment
       run: |
-        # 安装必要依赖
+        # 安装基础工具链
         sudo apt-get update
         sudo apt-get install -y \
             bc \
             bison \
             build-essential \
-            clang-${CLANG_VERSION} \
-            cmake \
+            clang-12 \
             flex \
-            gcc-multilib \
-            lib32z1 \
-            libelf-dev \
-            libncurses5-dev \
-            lld-${CLANG_VERSION} \
-            llvm-${CLANG_VERSION} \
+            lld-12 \
+            llvm-12 \
+            libncurses-dev \
             python2 \
-            unzip \
-            zlib1g-dev
-
-        # 创建符号链接解决python兼容问题
+            unzip
+        
+        # 修复Python兼容性
         sudo ln -sf /usr/bin/python2 /usr/bin/python
 
-    - name: Setup NDK toolchain
+    - name: Download NDK (with retry)
       run: |
-        # 下载并配置NDK
-        wget -q https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux-x86_64.zip
-        unzip -q android-ndk-${NDK_VERSION}-linux-x86_64.zip
-        export NDK_PATH="$PWD/android-ndk-${NDK_VERSION}"
+        for i in {1..3}; do
+          wget https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux-x86_64.zip && break
+          sleep $((i*10))
+        done
 
-        # 设置工具链路径
-        echo "CLANG_BIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
-        echo "GCC_BIN=$NDK_PATH/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
-        
-        # 更新PATH环境变量
-        echo "$CLANG_BIN:$GCC_BIN" >> $GITHUB_PATH
-
-    - name: Clean build directory
+    - name: Configure toolchains
       run: |
-        make O=out clean || true
-        rm -rf out/
+        unzip -q android-ndk-${{ env.NDK_VERSION }}-linux-x86_64.zip
+        echo "CLANG_PATH=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
+        echo "GCC_PATH=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
+        echo "$CLANG_PATH:$GCC_PATH" >> $GITHUB_PATH
 
-    - name: Apply code patches
+    - name: Clean parser cache
+      run: |
+        # 修复yylloc重复定义
+        rm -f scripts/kconfig/zconf.tab.c 
+        rm -f scripts/kconfig/zconf.lex.c
+        make O=out scripts/kconfig/zconf.tab.c
+        make O=out scripts/kconfig/zconf.lex.c
+
+    - name: Apply hotfixes
       run: |
         # 修复字符串拼接类型警告
-        sed -i 's/unsigned long arg, const char \*str/unsigned long arg, const char \*str, int base/g' \
-            drivers/staging/android/uapi/ion.h
+        find drivers/ -name "*.c" -exec sed -i 's/(unsigned long)arg + str/(const char *)(uintptr_t)arg + str/g' {} +
         
-        # 修复宏展开警告
-        find . -type f -name '*.c' -exec sed -i \
-            's/#define \([A-Z_]*\)_MASK GENMASK(\(.*\))/static const u64 \1_MASK = GENMASK(\2);/g' {} +
-
-    - name: Configure kernel
-      run: |
-        make O=out ARCH=${ARCH} \
-            CC="$CLANG_BIN/clang" \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE="$GCC_BIN/aarch64-linux-android-" \
-            CROSS_COMPILE_ARM32="$NDK_PATH/toolchains/arm-linux-androideabi-4.9/prebuilt/linux-x86_64/bin/arm-linux-androideabi-" \
-            msmcortex-NX563J-perf_defconfig
+        # 修复数组索引警告
+        sed -i 's/array\[index\++]/array[(int)index\++]/g' drivers/staging/android/ion/ion_buffer.c
 
     - name: Build kernel
       run: |
         set -x
-        make -j$(($(nproc)*3/4)) O=out ARCH=${ARCH} \
-            CC="$CLANG_BIN/clang" \
-            LD="$CLANG_BIN/ld.lld" \
-            AR="$CLANG_BIN/llvm-ar" \
-            NM="$CLANG_BIN/llvm-nm" \
-            OBJCOPY="$CLANG_BIN/llvm-objcopy" \
-            OBJDUMP="$CLANG_BIN/llvm-objdump" \
-            STRIP="$CLANG_BIN/llvm-strip" \
-            HOSTCC=clang-${CLANG_VERSION} \
-            HOSTCXX=clang++-${CLANG_VERSION} \
-            KCFLAGS="-Wno-error=unused-function \
-                     -Wno-error=unused-variable \
-                     -Wno-error=stringop-overflow \
-                     -Wno-error=implicit-function-declaration" \
-            CFLAGS_MODULE="-Wno-missing-prototypes"
+        # 生成配置
+        make O=out ARCH=$ARCH \
+            CC="$CLANG_PATH/clang" \
+            LD="$CLANG_PATH/ld.lld" \
+            CROSS_COMPILE="$GCC_PATH/aarch64-linux-android-" \
+            msmcortex-NX563J-perf_defconfig
 
-    - name: Upload artifacts
+        # 完整编译
+        make -j$(($(nproc)*3/4)) O=out ARCH=$ARCH \
+            CC="$CLANG_PATH/clang" \
+            LD="$CLANG_PATH/ld.lld" \
+            AR="$CLANG_PATH/llvm-ar" \
+            NM="$CLANG_PATH/llvm-nm" \
+            STRIP="$CLANG_PATH/llvm-strip" \
+            KCFLAGS="$KCFLAGS" \
+            CFLAGS_MODULE="-Wno-error"
+
+    - name: Upload image
       if: success()
       uses: actions/upload-artifact@v4
       with:
         name: kernel-image
-        path: out/arch/arm64/boot/Image
+        path: out/arch/${{ env.ARCH }}/boot/Image
