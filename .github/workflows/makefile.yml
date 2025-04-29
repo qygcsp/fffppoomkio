@@ -38,9 +38,13 @@ jobs:
             unzip
         sudo ln -sf /usr/bin/python2 /usr/bin/python
 
-    - name: Download NDK
+    - name: Download NDK (with retry)
       run: |
-        wget -q --retry-connrefused --waitretry=30 https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux-x86_64.zip
+        for i in {1..5}; do
+          wget -q --retry-connrefused --waitretry=30 \
+          https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux-x86_64.zip && break
+          sleep $((i*15))
+        done
         unzip -q android-ndk-${{ env.NDK_VERSION }}-linux-x86_64.zip
 
     - name: Apply signal fix patch
@@ -50,7 +54,7 @@ jobs:
         index 5d9e8d7..a1b2341 100644
         --- a/include/linux/signal.h
         +++ b/include/linux/signal.h
-        @@ -87,7 +87,7 @@ struct __sigqueue {
+        @@ -87,11 +87,11 @@ struct __sigqueue {
          #ifdef __ARCH_SI_PREAMBLE_SIZE
          #define SI_PAD_SIZE     ((__ARCH_SI_PREAMBLE_SIZE/sizeof(int)) - 3)
          #endif
@@ -59,7 +63,12 @@ jobs:
          
          typedef struct {
              unsigned long sig[_NSIG_WORDS];
-        @@ -158,12 +158,14 @@ static inline void sigdelset(sigset_t *set, int _sig)
+        -} sigset_t;
+        +} __attribute__((aligned(8))) sigset_t;
+         
+         #ifndef __HAVE_ARCH_SIG_BITOPS
+         static inline void sigaddset(sigset_t *set, int _sig)
+        @@ -158,8 +158,10 @@ static inline void sigdelset(sigset_t *set, int _sig)
                  break;
              case 1:
                  set->sig[0] = op(set->sig[0]);
@@ -71,18 +80,32 @@ jobs:
          }
          #endif /* __HAVE_ARCH_SIG_BITOPS */
         EOL
-        git apply signal_fix.patch
+        git apply --reject --whitespace=fix signal_fix.patch || true
 
     - name: Build kernel
       run: |
         export CLANG_PATH=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin
-        make O=out ARCH=$ARCH msmcortex-NX563J-perf_defconfig
-        make -j$(nproc) O=out ARCH=$ARCH \
+        export GCC_PATH=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin
+        
+        # 配置阶段
+        make O=out ARCH=$ARCH \
             CC="$CLANG_PATH/clang" \
             LD="$CLANG_PATH/ld.lld" \
-            KCFLAGS="$KCFLAGS"
+            CROSS_COMPILE="$GCC_PATH/aarch64-linux-android-" \
+            msmcortex-NX563J-perf_defconfig
+
+        # 编译阶段
+        make -j$(($(nproc)*3/4)) O=out ARCH=$ARCH \
+            CC="$CLANG_PATH/clang" \
+            LD="$CLANG_PATH/ld.lld" \
+            AR="$CLANG_PATH/llvm-ar" \
+            NM="$CLANG_PATH/llvm-nm" \
+            STRIP="$CLANG_PATH/llvm-strip" \
+            KCFLAGS="$KCFLAGS" \
+            CFLAGS_MODULE="-Wno-implicit-function-declaration"
 
     - name: Upload artifact
+      if: success()
       uses: actions/upload-artifact@v4
       with:
         name: kernel-image
