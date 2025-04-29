@@ -36,54 +36,53 @@ jobs:
             libncurses-dev \
             python2 \
             unzip
-        
-        # 修复Python兼容性
         sudo ln -sf /usr/bin/python2 /usr/bin/python
 
-    - name: Download NDK (with retry)
+    - name: Download NDK
       run: |
-        for i in {1..3}; do
-          wget https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux-x86_64.zip && break
-          sleep $((i*10))
-        done
-
-    - name: Configure toolchains
-      run: |
+        wget -q --retry-connrefused --waitretry=30 https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux-x86_64.zip
         unzip -q android-ndk-${{ env.NDK_VERSION }}-linux-x86_64.zip
-        echo "CLANG_PATH=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
-        echo "GCC_PATH=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
-        echo "$CLANG_PATH:$GCC_PATH" >> $GITHUB_PATH
 
-    - name: Apply signal.h patches
+    - name: Apply signal fix patch
       run: |
-        # 修复数组越界核心问题
-        find include/ -name "signal.h" -exec sed -i \
-            -e 's/^#define _NSIG_WORDS\s\+.*/#define _NSIG_WORDS 2/' \
-            -e 's/unsigned long sig\[_NSIG_WORDS\]/unsigned long sig[2]/' \
-            -e 's/case 2: \(.*set->sig\[1\]\)/case 2: if (_NSIG_WORDS > 1) \1/' \
-            -e 's/case 3: \(.*set->sig\[2\]\)/case 3: if (_NSIG_WORDS > 2) \1/' {} +
+        cat > signal_fix.patch <<'EOL'
+        diff --git a/include/linux/signal.h b/include/linux/signal.h
+        index 5d9e8d7..a1b2341 100644
+        --- a/include/linux/signal.h
+        +++ b/include/linux/signal.h
+        @@ -87,7 +87,7 @@ struct __sigqueue {
+         #ifdef __ARCH_SI_PREAMBLE_SIZE
+         #define SI_PAD_SIZE     ((__ARCH_SI_PREAMBLE_SIZE/sizeof(int)) - 3)
+         #endif
+        -#define _NSIG_WORDS (_NSIG / _NSIG_BPW)
+        +#define _NSIG_WORDS 2
+         
+         typedef struct {
+             unsigned long sig[_NSIG_WORDS];
+        @@ -158,12 +158,14 @@ static inline void sigdelset(sigset_t *set, int _sig)
+                 break;
+             case 1:
+                 set->sig[0] = op(set->sig[0]);
+        +#if _NSIG_WORDS > 1
+             case 2:
+                 set->sig[1] = op(set->sig[1]);
+        +#endif
+             }
+         }
+         #endif /* __HAVE_ARCH_SIG_BITOPS */
+        EOL
+        git apply signal_fix.patch
 
     - name: Build kernel
       run: |
-        set -x
-        # 生成配置
-        make O=out ARCH=$ARCH \
+        export CLANG_PATH=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin
+        make O=out ARCH=$ARCH msmcortex-NX563J-perf_defconfig
+        make -j$(nproc) O=out ARCH=$ARCH \
             CC="$CLANG_PATH/clang" \
             LD="$CLANG_PATH/ld.lld" \
-            CROSS_COMPILE="$GCC_PATH/aarch64-linux-android-" \
-            msmcortex-NX563J-perf_defconfig
-
-        # 完整编译
-        make -j$(($(nproc)*3/4)) O=out ARCH=$ARCH \
-            CC="$CLANG_PATH/clang" \
-            LD="$CLANG_PATH/ld.lld" \
-            AR="$CLANG_PATH/llvm-ar" \
-            NM="$CLANG_PATH/llvm-nm" \
-            STRIP="$CLANG_PATH/llvm-strip" \
             KCFLAGS="$KCFLAGS"
 
-    - name: Upload image
-      if: success()
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: kernel-image
