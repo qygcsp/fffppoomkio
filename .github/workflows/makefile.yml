@@ -20,6 +20,8 @@ jobs:
       with:
         repository: qgzslm/ppoomkio
         fetch-depth: 0
+        # 确保检出所有子模块
+        submodules: recursive
 
     - name: Setup environment
       run: |
@@ -57,18 +59,27 @@ jobs:
     - name: Clean parser cache
       run: |
         # 修复yylloc重复定义
-        rm -f scripts/kconfig/zconf.tab.c 
-        rm -f scripts/kconfig/zconf.lex.c
+        if [ -f scripts/kconfig/zconf.tab.c ]; then
+          rm -f scripts/kconfig/zconf.tab.c 
+        fi
+        if [ -f scripts/kconfig/zconf.lex.c ]; then
+          rm -f scripts/kconfig/zconf.lex.c
+        fi
         make O=out scripts/kconfig/zconf.tab.c
-        make O=out scripts/kconfig/zconf.lex.c
 
     - name: Apply hotfixes
       run: |
-        # 修复字符串拼接类型警告
-        find drivers/ -name "*.c" -exec sed -i 's/(unsigned long)arg + str/(const char *)(uintptr_t)arg + str/g' {} +
+        # 修复字符串拼接类型警告（使用更安全的路径查找）
+        find drivers/ -type f -name "*.c" -exec sed -i 's/(unsigned long)arg + str/(const char *)(uintptr_t)arg + str/g' {} + || true
         
-        # 修复数组索引警告
-        sed -i 's/array\[index\++]/array[(int)index\++]/g' drivers/staging/android/ion/ion_buffer.c
+        # 修复数组索引警告（增加文件存在性检查）
+        if [ -f drivers/android/ion/ion_buffer.c ]; then
+          sed -i 's/array\[index\++]/array[(int)index\++]/g' drivers/android/ion/ion_buffer.c
+        elif [ -f drivers/staging/android/ion/ion_buffer.c ]; then
+          sed -i 's/array\[index\++]/array[(int)index\++]/g' drivers/staging/android/ion/ion_buffer.c
+        else
+          echo "WARNING: ion_buffer.c not found in expected locations"
+        fi
 
     - name: Build kernel
       run: |
