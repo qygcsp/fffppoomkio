@@ -12,7 +12,7 @@ jobs:
     env:
       ARCH: arm64
       NDK_VERSION: r20b
-      KCFLAGS: "-Wno-error=array-bounds -Wno-error=stringop-overflow"
+      KCFLAGS: "-Wno-error=array-bounds -Wno-error=unused-function"
 
     steps:
     - name: Checkout source
@@ -37,7 +37,7 @@ jobs:
             python2 \
             unzip
         
-        # Python兼容性修复
+        # 修复Python兼容性
         sudo ln -sf /usr/bin/python2 /usr/bin/python
 
     - name: Download NDK (with retry)
@@ -54,15 +54,14 @@ jobs:
         echo "GCC_PATH=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin" >> $GITHUB_ENV
         echo "$CLANG_PATH:$GCC_PATH" >> $GITHUB_PATH
 
-    - name: Apply signal array fix
+    - name: Apply signal.h patches
       run: |
-        # 核心修复：调整信号集数组访问
-        find include/linux/ -name "signal.h" -exec sed -i \
-            -e 's/case 4: set->sig\[3\]/case 4: if (_NSIG_WORDS > 3) set->sig[3]/g' \
-            -e 's/case 3: set->sig\[2\]/case 3: if (_NSIG_WORDS > 2) set->sig[2]/g' \
-            -e 's/case 2: set->sig\[1\]/case 2: if (_NSIG_WORDS > 1) set->sig[1]/g' \
-            -e 's/#define _NSIG_WORDS\s\+.*/#define _NSIG_WORDS 2/' \
-            -e 's/unsigned long sig\[_NSIG_WORDS\]/unsigned long sig[2]/g' {} +
+        # 修复数组越界核心问题
+        find include/ -name "signal.h" -exec sed -i \
+            -e 's/^#define _NSIG_WORDS\s\+.*/#define _NSIG_WORDS 2/' \
+            -e 's/unsigned long sig\[_NSIG_WORDS\]/unsigned long sig[2]/' \
+            -e 's/case 2: \(.*set->sig\[1\]\)/case 2: if (_NSIG_WORDS > 1) \1/' \
+            -e 's/case 3: \(.*set->sig\[2\]\)/case 3: if (_NSIG_WORDS > 2) \1/' {} +
 
     - name: Build kernel
       run: |
@@ -81,8 +80,7 @@ jobs:
             AR="$CLANG_PATH/llvm-ar" \
             NM="$CLANG_PATH/llvm-nm" \
             STRIP="$CLANG_PATH/llvm-strip" \
-            KCFLAGS="$KCFLAGS" \
-            CFLAGS_MODULE="-Wno-implicit-function-declaration"
+            KCFLAGS="$KCFLAGS"
 
     - name: Upload image
       if: success()
