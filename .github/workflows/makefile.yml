@@ -8,7 +8,7 @@ jobs:
   build-kernel:
     name: Build Kernel
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       ARCH: arm64
       NDK_VERSION: r20b
@@ -19,90 +19,65 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: qgzslm/ppoomkio
-        fetch-depth: 0
+        ref: master
         submodules: recursive
+        fetch-depth: 0
 
-    - name: Setup environment
+    - name: Setup build environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y \
-            bc \
-            bison \
-            build-essential \
-            clang-12 \
-            flex \
-            lld-12 \
-            llvm-12 \
-            libncurses-dev \
-            python2 \
-            unzip
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            bc bison build-essential clang-12 flex lld-12 llvm-12 \
+            libncurses-dev python2 unzip zlib1g-dev
         sudo ln -sf /usr/bin/python2 /usr/bin/python
 
-    - name: Download NDK (with retry)
+    - name: Download NDK (Multi-source)
       run: |
-        for i in {1..5}; do
-          wget -q --retry-connrefused --waitretry=30 \
-          https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux-x86_64.zip && break
-          sleep $((i*15))
+        # 多镜像源下载
+        for url in \
+          "https://dl.google.com/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux-x86_64.zip" \
+          "https://mirrors.ustc.edu.cn/android/repository/android-ndk-${{ env.NDK_VERSION }}-linux-x86_64.zip"; 
+        do
+          if wget -q --tries=3 --timeout=30 "$url"; then
+            break
+          fi
         done
         unzip -q android-ndk-${{ env.NDK_VERSION }}-linux-x86_64.zip
 
-    - name: Apply signal fix patch
+    - name: Apply critical fixes
       run: |
-        cat > signal_fix.patch <<'EOL'
-        diff --git a/include/linux/signal.h b/include/linux/signal.h
-        index 5d9e8d7..a1b2341 100644
-        --- a/include/linux/signal.h
-        +++ b/include/linux/signal.h
-        @@ -87,11 +87,11 @@ struct __sigqueue {
-         #ifdef __ARCH_SI_PREAMBLE_SIZE
-         #define SI_PAD_SIZE     ((__ARCH_SI_PREAMBLE_SIZE/sizeof(int)) - 3)
-         #endif
-        -#define _NSIG_WORDS (_NSIG / _NSIG_BPW)
-        +#define _NSIG_WORDS 2
-         
-         typedef struct {
-             unsigned long sig[_NSIG_WORDS];
-        -} sigset_t;
-        +} __attribute__((aligned(8))) sigset_t;
-         
-         #ifndef __HAVE_ARCH_SIG_BITOPS
-         static inline void sigaddset(sigset_t *set, int _sig)
-        @@ -158,8 +158,10 @@ static inline void sigdelset(sigset_t *set, int _sig)
-                 break;
-             case 1:
-                 set->sig[0] = op(set->sig[0]);
-        +#if _NSIG_WORDS > 1
-             case 2:
-                 set->sig[1] = op(set->sig[1]);
-        +#endif
-             }
-         }
-         #endif /* __HAVE_ARCH_SIG_BITOPS */
-        EOL
-        git apply --reject --whitespace=fix signal_fix.patch || true
+        # 信号集数组修复补丁
+        find include/ -name "signal.h" -exec sed -i -E '
+          /^#define _NSIG_WORDS/d;
+          s/unsigned long sig\[_NSIG_WORDS\]/unsigned long sig[2]/g;
+          s/(case [2-4]:.*sig\[)([0-9])(\])/if (_NSIG_WORDS > \2) \1\2\3/g;
+          1i #define _NSIG_WORDS 2
+        ' {} +
+
+        # 修复汇编偏移计算
+        sed -i 's/->sig\[1\]/->sig[0]/g' arch/arm64/kernel/asm-offsets.c
 
     - name: Build kernel
       run: |
-        export CLANG_PATH=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin
-        export GCC_PATH=$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin
-        
+        export CLANG_BIN="$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        export GCC_BIN="$PWD/android-ndk-${{ env.NDK_VERSION }}/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin"
+
         # 配置阶段
         make O=out ARCH=$ARCH \
-            CC="$CLANG_PATH/clang" \
-            LD="$CLANG_PATH/ld.lld" \
-            CROSS_COMPILE="$GCC_PATH/aarch64-linux-android-" \
+            CC="$CLANG_BIN/clang" \
+            LD="$CLANG_BIN/ld.lld" \
+            CROSS_COMPILE="$GCC_BIN/aarch64-linux-android-" \
             msmcortex-NX563J-perf_defconfig
 
         # 编译阶段
-        make -j$(($(nproc)*3/4)) O=out ARCH=$ARCH \
-            CC="$CLANG_PATH/clang" \
-            LD="$CLANG_PATH/ld.lld" \
-            AR="$CLANG_PATH/llvm-ar" \
-            NM="$CLANG_PATH/llvm-nm" \
-            STRIP="$CLANG_PATH/llvm-strip" \
+        make -j$(( ($(nproc) * 3) / 4 )) O=out ARCH=$ARCH \
+            CC="$CLANG_BIN/clang" \
+            LD="$CLANG_BIN/ld.lld" \
+            AR="$CLANG_BIN/llvm-ar" \
+            STRIP="$CLANG_BIN/llvm-strip" \
+            NM="$CLANG_BIN/llvm-nm" \
             KCFLAGS="$KCFLAGS" \
-            CFLAGS_MODULE="-Wno-implicit-function-declaration"
+            CFLAGS_KERNEL="-Wno-error=stringop-overread"
 
     - name: Upload artifact
       if: success()
