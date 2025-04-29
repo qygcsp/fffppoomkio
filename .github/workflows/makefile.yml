@@ -1,27 +1,56 @@
-name: CI
+name: Android Kernel CI
 
 on:
   workflow_dispatch:
 
 jobs:
   build-kernel:
-    name: Build Kernel
+    name: Build Android 9 Kernel
     runs-on: ubuntu-22.04
-    
-- name: Install Android NDK
-  run: |
-    wget https://dl.google.com/android/repository/android-ndk-r25b-linux.zip
-    unzip android-ndk-r25b-linux.zip
-    echo "NDK_HOME=$PWD/android-ndk-r25b" >> $GITHUB_ENV
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      CROSS_COMPILE: aarch64-linux-android-
+      CLANG_TRIPLE: aarch64-linux-gnu-
+
     steps:
-      - name: Build
-        uses: dabao1955/kernel_build_action@main
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
         with:
-          kernel-url: https://github.com/qgzslm/ppoomkio
-          kernel-branch: master
-          config: msmcortex-NX563J-perf_defconfig
-          arch: arm64
-          aosp-gcc: true
-          aosp-clang: true
-          android-version: 12
-          aosp-clang-version: r383902
+          repository: qgzslm/ppoomkio
+          ref: master
+
+      - name: Setup build environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flex bison build-essential libncurses-dev
+
+      - name: Setup AOSP toolchain
+        run: |
+          mkdir -p aosp-tools
+          # 使用Android 9对应的工具链版本
+          wget https://dl.google.com/android/repository/android-ndk-r20b-linux-x86_64.zip
+          unzip android-ndk-r20b-linux-x86_64.zip
+          export ANDROID_TOOLCHAIN=$(pwd)/android-ndk-r20b/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin
+          echo "$ANDROID_TOOLCHAIN" >> $GITHUB_PATH
+
+      - name: Build kernel
+        run: |
+          make O=out msmcortex-NX563J-perf_defconfig
+          make -j$(nproc --all) O=out \
+              CC=clang \
+              CLANG_TRIPLE=aarch64-linux-gnu- \
+              CROSS_COMPILE=aarch64-linux-android- \
+              CROSS_COMPILE_ARM32=arm-linux-androideabi- \
+              LD=ld.lld \
+              AR=llvm-ar \
+              NM=llvm-nm \
+              OBJCOPY=llvm-objcopy \
+              OBJDUMP=llvm-objdump \
+              STRIP=llvm-strip
+
+      - name: Archive artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: kernel-image
+          path: out/arch/arm64/boot/Image
